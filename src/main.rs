@@ -1,17 +1,6 @@
-use secp256k1zkp::{constants, pedersen::Commitment, ContextFlag, PublicKey, Secp256k1, SecretKey};
+use secp256k1zkp::{constants, key, pedersen::Commitment, ContextFlag, PublicKey, Secp256k1, SecretKey};
 
 use rand::{thread_rng, Rng};
-
-pub const PUBLIC_KEY_F: [u8; 64] = [
-    0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54,
-    0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
-    0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5,
-    0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
-    0x31, 0xd3, 0xc6, 0x86, 0x39, 0x73, 0x92, 0x6e,
-    0x04, 0x9e, 0x63, 0x7c, 0xb1, 0xb5, 0xf4, 0x0a,
-    0x36, 0xda, 0xc2, 0x8a, 0xf1, 0x76, 0x69, 0x68,
-    0xc3, 0x0c, 0x23, 0x13, 0xf3, 0xa3, 0x89, 0x04
-];
 
 #[allow(non_snake_case)]
 #[derive(Debug)]
@@ -55,6 +44,7 @@ pub struct Prover {
 pub struct Pedersen(Secp256k1);
 
 pub fn tou8(value: &u64) -> Vec<u8> {
+    // TODO:  generate 256 bit random number
     let mut v = vec![0u8; 24];
     v.extend_from_slice(&value.to_be_bytes());
     v
@@ -118,7 +108,7 @@ impl Pedersen {
             W_O: self.0.commit(value_o, r_o.clone()).unwrap(),
         };
 
-        let F = Commitment::from_vec(PUBLIC_KEY_F.to_vec());
+        let F = self.0.commit(0, key::ONE_KEY).unwrap();
 
         let c3_commit = self
             .0
@@ -195,6 +185,7 @@ impl Pedersen {
             None => panic!("No commit_mul"),
         };
 
+        // TODO: create some helper function for these very similar code: from e1 to z3
         let e1 = self
             .0
             .blind_sum(vec![value_l, commit_mul.t1.clone()], vec![])
@@ -276,6 +267,8 @@ impl Pedersen {
         (e1, e2, z1, z2, z3): (SecretKey, SecretKey, SecretKey, SecretKey, SecretKey), /*(e1, e2, z1, z2, z3) */
     ) -> bool {
         let x = SecretKey::from_slice(&self.0, &tou8(&x)).unwrap();
+
+        // TODO: create some helper function for these very similar code: from equation 1 to 3
         //𝐶𝑜𝑚(𝑒1,𝑧1)=𝑥×𝑊𝐿+𝐶1
         let w_left = self.0.commit_blind(e1.clone(), z1.clone()).unwrap();
         let w_right = self
@@ -307,7 +300,7 @@ impl Pedersen {
         //𝑒1×𝑊𝑅+𝑧3×𝐹=𝑥×𝑊𝑂+𝐶3
         // 𝐶3 = 𝑡1×𝑊𝑅+𝑡4×𝐹
 
-        let F = Commitment::from_vec(PUBLIC_KEY_F.to_vec());
+        let F = self.0.commit(0, key::ONE_KEY).unwrap();
 
         let w_left = self
             .0
