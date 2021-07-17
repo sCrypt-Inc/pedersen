@@ -1,4 +1,6 @@
-use secp256k1zkp::{constants, key, pedersen::Commitment, ContextFlag, PublicKey, Secp256k1, SecretKey};
+use secp256k1zkp::{
+    constants, key, pedersen::Commitment, ContextFlag, PublicKey, Secp256k1, SecretKey,
+};
 
 use rand::{thread_rng, Rng};
 
@@ -44,10 +46,26 @@ pub struct Prover {
 pub struct Pedersen(Secp256k1);
 
 pub fn tou8(value: &u64) -> Vec<u8> {
-    // TODO:  generate 256 bit random number
     let mut v = vec![0u8; 24];
     v.extend_from_slice(&value.to_be_bytes());
     v
+}
+
+pub fn to_secret_key(secp: &Secp256k1, value: &u64) -> SecretKey {
+    SecretKey::from_slice(secp, &tou8(value)).unwrap()
+}
+
+pub fn computes_opening_value(
+    secp: &Secp256k1,
+    value: &SecretKey,
+    x: &SecretKey,
+    t: &SecretKey,
+) -> SecretKey {
+    let mut value = value.clone();
+
+    value.mul_assign(&secp, &x).unwrap();
+
+    secp.blind_sum(vec![value, t.clone()], vec![]).unwrap()
 }
 
 pub fn mul_commit_secret(secp: &Secp256k1, w: &Commitment, r: &SecretKey) -> Commitment {
@@ -63,7 +81,7 @@ impl Pedersen {
         Pedersen(Secp256k1::with_caps(ContextFlag::Commit))
     }
 
-    pub fn generate_prover(&self, value_l: u64, value_r: u64, value_o: u64) -> Prover {
+    pub fn generate_add_prover(&self, value_l: u64, value_r: u64, value_o: u64) -> Prover {
         let r_l = SecretKey::new(&self.0, &mut thread_rng());
         let r_r = SecretKey::new(&self.0, &mut thread_rng());
         let r_o = SecretKey::new(&self.0, &mut thread_rng());
@@ -78,9 +96,9 @@ impl Pedersen {
             r_l: r_l.clone(),
             r_r: r_r.clone(),
             r_o: r_o.clone(),
-            value_l: SecretKey::from_slice(&self.0, &tou8(&value_l)).unwrap(),
-            value_r: SecretKey::from_slice(&self.0, &tou8(&value_r)).unwrap(),
-            value_o: SecretKey::from_slice(&self.0, &tou8(&value_o)).unwrap(),
+            value_l: to_secret_key(&self.0, &value_l),
+            value_r: to_secret_key(&self.0, &value_r),
+            value_o: to_secret_key(&self.0, &value_o),
             witness: PedersenWitness {
                 W_L: self.0.commit(value_l, r_l.clone()).unwrap(),
                 W_R: self.0.commit(value_r, r_r.clone()).unwrap(),
@@ -136,9 +154,9 @@ impl Pedersen {
             r_l: r_l.clone(),
             r_r: r_r.clone(),
             r_o: r_o.clone(),
-            value_l: SecretKey::from_slice(&self.0, &tou8(&value_l)).unwrap(),
-            value_r: SecretKey::from_slice(&self.0, &tou8(&value_r)).unwrap(),
-            value_o: SecretKey::from_slice(&self.0, &tou8(&value_o)).unwrap(),
+            value_l: to_secret_key(&self.0, &value_l),
+            value_r: to_secret_key(&self.0, &value_r),
+            value_o: to_secret_key(&self.0, &value_o),
             witness: p_witness,
             commit_add: None,
             commit_mul: Some(commit_mul),
@@ -146,7 +164,7 @@ impl Pedersen {
     }
 
     //The prover then computes the opening value: 𝑧=𝑥(𝑟𝐿+𝑟𝑅−𝑟𝑂)+𝑟𝐵 and sends it to the verifier.
-    pub fn generate_z(&self, x: u64, prover: &Prover) -> SecretKey {
+    pub fn prove_add_gate(&self, x: u64, prover: &Prover) -> SecretKey {
         let mut z = self
             .0
             .blind_sum(
@@ -155,7 +173,7 @@ impl Pedersen {
             )
             .unwrap();
 
-        let x = SecretKey::from_slice(&self.0, &tou8(&x)).unwrap();
+        let x = to_secret_key(&self.0, &x);
 
         z.mul_assign(&self.0, &x).unwrap();
 
@@ -169,67 +187,36 @@ impl Pedersen {
         z
     }
 
-    pub fn generate_mul_z(
+    pub fn prove_mul_gate(
         &self,
-        x: u64,
+        x: u64, //challenge
         prover: &Prover,
     ) -> (SecretKey, SecretKey, SecretKey, SecretKey, SecretKey) {
-        let x = SecretKey::from_slice(&self.0, &tou8(&x)).unwrap();
-        //𝑒1=𝑤𝐿𝑥+𝑡1
-        let mut value_l = prover.value_l.clone();
-
-        value_l.mul_assign(&self.0, &x).unwrap();
+        let x = to_secret_key(&self.0, &x);
 
         let commit_mul = match &prover.commit_mul {
             Some(c) => c,
             None => panic!("No commit_mul"),
         };
 
-        // TODO: create some helper function for these very similar code: from e1 to z3
-        let e1 = self
-            .0
-            .blind_sum(vec![value_l, commit_mul.t1.clone()], vec![])
-            .unwrap();
+        //𝑒1=𝑤𝐿𝑥+𝑡1
+        let e1 = computes_opening_value(&self.0, &prover.value_l, &x, &commit_mul.t1);
         //𝑒2=𝑤𝑅𝑥+𝑡2
-        let mut value_r = prover.value_r.clone();
-
-        value_r.mul_assign(&self.0, &x).unwrap();
-
-        let e2 = self
-            .0
-            .blind_sum(vec![value_r, commit_mul.t2.clone()], vec![])
-            .unwrap();
+        let e2 = computes_opening_value(&self.0, &prover.value_r, &x, &commit_mul.t2);
         //𝑧1=𝑟𝐿𝑥+𝑡3
-        let mut r_l = prover.r_l.clone();
-        r_l.mul_assign(&self.0, &x).unwrap();
-
-        let z1 = self
-            .0
-            .blind_sum(vec![r_l, commit_mul.t3.clone()], vec![])
-            .unwrap();
+        let z1 = computes_opening_value(&self.0, &prover.r_l, &x, &commit_mul.t3);
         //𝑧2=𝑟𝑅𝑥+𝑡5
-        let mut r_r = prover.r_r.clone();
-        r_r.mul_assign(&self.0, &x).unwrap();
-
-        let z2 = self
-            .0
-            .blind_sum(vec![r_r, commit_mul.t5.clone()], vec![])
-            .unwrap();
+        let z2 = computes_opening_value(&self.0, &prover.r_r, &x, &commit_mul.t5);
         //𝑧3=(𝑟𝑂−𝑤𝐿𝑟𝑅)𝑥+𝑡4
-        let mut value_l = prover.value_l.clone();
-        value_l.mul_assign(&self.0, &prover.r_r.clone()).unwrap();
+        let mut 𝑤_l_𝑟_l = prover.value_l.clone();
+        𝑤_l_𝑟_l.mul_assign(&self.0, &prover.r_r.clone()).unwrap();
 
-        let mut r_tmp = self
+        let r_o_𝑤_l𝑟_r = self
             .0
-            .blind_sum(vec![prover.r_o.clone()], vec![value_l])
-            .unwrap();
-        r_tmp.mul_assign(&self.0, &x).unwrap();
-
-        let z3 = self
-            .0
-            .blind_sum(vec![r_tmp, commit_mul.t4.clone()], vec![])
+            .blind_sum(vec![prover.r_o.clone()], vec![𝑤_l_𝑟_l])
             .unwrap();
 
+        let z3 = computes_opening_value(&self.0, &r_o_𝑤_l𝑟_r, &x, &commit_mul.t4);
         (e1, e2, z1, z2, z3)
     }
 
@@ -248,7 +235,7 @@ impl Pedersen {
             )
             .unwrap();
 
-        let x = SecretKey::from_slice(&self.0, &tou8(&x)).unwrap();
+        let x = to_secret_key(&self.0, &x);
 
         let w_sum = mul_commit_secret(&self.0, &w_sum_tmp, &x);
 
@@ -266,36 +253,25 @@ impl Pedersen {
         commits: &CommitMul,
         (e1, e2, z1, z2, z3): (SecretKey, SecretKey, SecretKey, SecretKey, SecretKey), /*(e1, e2, z1, z2, z3) */
     ) -> bool {
-        let x = SecretKey::from_slice(&self.0, &tou8(&x)).unwrap();
+        let x = to_secret_key(&self.0, &x);
 
-        // TODO: create some helper function for these very similar code: from equation 1 to 3
+        let right_expr = |w: Commitment, c: Commitment| {
+            self.0
+                .commit_sum(vec![mul_commit_secret(&self.0, &w, &x), c], vec![])
+                .unwrap()
+        };
+
+        let verify_equation = |e: SecretKey, z: SecretKey, w: Commitment, c: Commitment| {
+            let w_left = self.0.commit_blind(e, z).unwrap();
+            let w_right = right_expr(w, c);
+            assert_eq!(w_left, w_right);
+        };
+
         //𝐶𝑜𝑚(𝑒1,𝑧1)=𝑥×𝑊𝐿+𝐶1
-        let w_left = self.0.commit_blind(e1.clone(), z1.clone()).unwrap();
-        let w_right = self
-            .0
-            .commit_sum(
-                vec![
-                    mul_commit_secret(&self.0, &witness.W_L.clone(), &x),
-                    commits.c1_commit,
-                ],
-                vec![],
-            )
-            .unwrap();
-        assert_eq!(w_left, w_right);
+        verify_equation(e1.clone(), z1, witness.W_L, commits.c1_commit);
 
         // 𝐶𝑜𝑚(𝑒2,𝑧2)=𝑥×𝑊𝑅+𝐶2
-        let w_left = self.0.commit_blind(e2.clone(), z2.clone()).unwrap();
-        let w_right = self
-            .0
-            .commit_sum(
-                vec![
-                    mul_commit_secret(&self.0, &witness.W_R.clone(), &x),
-                    commits.c2_commit,
-                ],
-                vec![],
-            )
-            .unwrap();
-        assert_eq!(w_left, w_right);
+        verify_equation(e2.clone(), z2, witness.W_R, commits.c2_commit);
 
         //𝑒1×𝑊𝑅+𝑧3×𝐹=𝑥×𝑊𝑂+𝐶3
         // 𝐶3 = 𝑡1×𝑊𝑅+𝑡4×𝐹
@@ -306,23 +282,14 @@ impl Pedersen {
             .0
             .commit_sum(
                 vec![
-                    mul_commit_secret(&self.0, &witness.W_R.clone(), &e1.clone()),
-                    mul_commit_secret(&self.0, &F, &z3.clone()),
+                    mul_commit_secret(&self.0, &witness.W_R, &e1),
+                    mul_commit_secret(&self.0, &F, &z3),
                 ],
                 vec![],
             )
             .unwrap();
 
-        let w_right = self
-            .0
-            .commit_sum(
-                vec![
-                    mul_commit_secret(&self.0, &witness.W_O.clone(), &x.clone()),
-                    commits.c3_commit,
-                ],
-                vec![],
-            )
-            .unwrap();
+        let w_right = right_expr(witness.W_O, commits.c3_commit);
 
         assert_eq!(w_left, w_right);
 
@@ -333,7 +300,7 @@ impl Pedersen {
 fn main() {
     let pederson = Pedersen::new();
     // 4 = 1 + 3
-    let prover = pederson.generate_prover(1, 3, 4);
+    let prover = pederson.generate_add_prover(1, 3, 4);
     println!("prover: {:?}", prover);
 
     let b_commit = match prover.commit_add.clone() {
@@ -345,7 +312,7 @@ fn main() {
 
     // x is challenge
     let x = 1;
-    let z = pederson.generate_z(x, &prover);
+    let z = pederson.prove_add_gate(x, &prover);
 
     println!("z: {:?}", z);
 
@@ -353,12 +320,11 @@ fn main() {
 
     assert!(success, "𝐶𝑜𝑚(0,𝑧)=𝑥×(𝑊𝐿+𝑊𝑅−𝑊𝑂)+𝐵 fail");
 
-
     // 1 = 1 * 1
     let prover = pederson.generate_mul_prover(1, 1, 1);
     println!("prover: {:?}", prover);
 
-    let tuple = pederson.generate_mul_z(x, &prover);
+    let tuple = pederson.prove_mul_gate(x, &prover);
 
     println!("tuple: {:?}", tuple);
 
